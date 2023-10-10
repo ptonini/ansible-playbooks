@@ -1,0 +1,130 @@
+---
+- name: Setup Elasticsearch
+  gather_facts: no
+  hosts: elastic0001
+  become: yes
+  vars:
+    cluster_name: elastic
+    password: 1234@asdf
+    data_volume_device: /dev/nvme1n1
+    version: 8.10.2
+    apt_repositories:
+      - repo: deb [arch=amd64, signed-by=/etc/apt/trusted.gpg.d/docker.asc] https://download.docker.com/linux/debian bullseye stable
+        gpg_url: https://download.docker.com/linux/debian/gpg
+        gpg_dest: /etc/apt/trusted.gpg.d/docker.asc
+    apt_packages:
+      - docker-ce
+      - docker-compose
+      - python3-docker
+      - parted
+
+  tasks:
+
+    - name: Install dependencies
+      when: false
+      block:
+
+        - name: Allow apt release info changes
+          ansible.builtin.shell:
+            cmd: apt-get --allow-releaseinfo-change update
+          changed_when: False
+
+        - name: Add repositories gpg keys
+          ansible.builtin.get_url:
+            url: "{{ item.gpg_url }}"
+            dest: "{{ item.gpg_dest}}"
+          loop: "{{ apt_repositories }}"
+
+        - name: Add repositories into sources list
+          ansible.builtin.apt_repository:
+            repo: "{{ item.repo }}"
+            state: present
+          loop: "{{ apt_repositories }}"
+
+        - name: Update cache
+          ansible.builtin.apt:
+            update_cache: true
+          changed_when: False
+    
+        - name: Install apt packages
+          ansible.builtin.apt:
+            name: "{{ item }}"
+            state: present
+          loop: "{{ apt_packages }}"
+
+    - name: Config data volume
+      when: false
+      block:
+
+        - name: Create partition
+          community.general.parted:
+            device: "{{ data_volume_device }}"
+            number: 1
+            state: present
+            fs_type: ext4
+
+        - name: Format partition
+          community.general.filesystem:
+            fstype: ext4
+            dev: "{{ data_volume_device }}"
+
+        - name: Mount volume
+          ansible.posix.mount:
+            path: /data
+            src: "{{ data_volume_device }}"
+            fstype: ext4
+            state: mounted
+
+        - name: Set volume ownership
+          ansible.builtin.file:
+            path: /data
+            owner: 1000
+            group: 1000
+
+    - name: Config elasticsearch
+      when: true
+      block:
+
+        - name: Start Docker
+          ansible.builtin.service:
+            name: docker
+            enabled: true
+            state: started
+
+        - name: Start elasticsearch
+          community.docker.docker_compose:
+            project_name: elasticsearch
+            state: present
+            definition:
+              version: '2'
+              services:
+                elasticsearch:
+                  image: docker.elastic.co/elasticsearch/elasticsearch:{{ version }}
+                  volumes:
+                    - /data:/usr/share/elasticsearch/data
+                  ports:
+                    - 9200:9200
+                  environment:
+                    - node.name=elastic0001
+                    - cluster.name={{ cluster_name }}
+                    - discovery.type=single-node
+                    - ELASTIC_PASSWORD={{ password }}
+                    - bootstrap.memory_lock=true
+                    - xpack.security.enabled=true
+                  restart: always
+                kibana:
+                  image: docker.elastic.co/kibana/kibana:{{ version }}
+                  ports:
+                    - 5601:5601
+                  environment:
+                    ELASTICSEARCH_URL: http://elasticsearch:9200
+                    ELASTICSEARCH_USERNAME: elastic
+                    ELASTICSEARCH_PASSWORD: "{{ password }}"
+                  depends_on:
+                    - elasticsearch
+                  restart: always
+          register: output
+
+        - name: Show results
+          ansible.builtin.debug:
+            var: output
